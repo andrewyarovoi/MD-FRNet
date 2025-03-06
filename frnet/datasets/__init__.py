@@ -1,3 +1,4 @@
-from .nuscenes_dataset import NuScenesSegDataset
+from .semkitti_reduced_dataset import SemKittiReducedDataset
+from .mixed import MixedDataset
 
-__all__ = ['NuScenesSegDataset']
+__all__ = ['SemKittiReducedDataset', 'MixedDataset']

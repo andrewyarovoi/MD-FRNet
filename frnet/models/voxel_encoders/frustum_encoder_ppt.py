@@ -6,10 +6,11 @@ import torch_scatter
 from mmcv.cnn import build_norm_layer
 from mmdet3d.registry import MODELS
 from mmdet3d.utils import ConfigType
-
+from ..normalization.normalization import PPTPointNorm, SequentialPassthrough, build_norm_layer_ppt
+from torch import Tensor
 
 @MODELS.register_module()
-class FrustumFeatureEncoder(nn.Module):
+class FrustumFeatureEncoderPPT(nn.Module):
     """Frustum Feature Encoder.
 
     Args:
@@ -34,11 +35,10 @@ class FrustumFeatureEncoder(nn.Module):
                  feat_channels: Sequence[int] = [],
                  with_distance: bool = False,
                  with_cluster_center: bool = False,
-                 norm_cfg: ConfigType = dict(
-                     type='BN1d', eps=1e-5, momentum=0.1),
+                 norm_cfg: ConfigType = {},
                  with_pre_norm: bool = False,
                  feat_compression: Optional[int] = None) -> None:
-        super(FrustumFeatureEncoder, self).__init__()
+        super(FrustumFeatureEncoderPPT, self).__init__()
         assert len(feat_channels) > 0
 
         if with_distance:
@@ -48,25 +48,25 @@ class FrustumFeatureEncoder(nn.Module):
         self.in_channels = in_channels
         self._with_distance = with_distance
         self._with_cluster_center = with_cluster_center
+        self.use_ppt = norm_cfg["use_ppt"]
 
         feat_channels = [self.in_channels] + list(feat_channels)
         if with_pre_norm:
-            self.pre_norm = build_norm_layer(norm_cfg, self.in_channels)[1]
+            self.pre_norm = build_norm_layer_ppt(norm_cfg.copy(), self.in_channels)[1] 
         else:
             self.pre_norm = None
 
         ffe_layers = []
         for i in range(len(feat_channels) - 1):
             in_filters = feat_channels[i]
-            out_filters = feat_channels[i + 1]
-            norm_layer = build_norm_layer(norm_cfg, out_filters)[1]
+            out_filters = feat_channels[i + 1] 
             if i == len(feat_channels) - 2:
                 ffe_layers.append(nn.Linear(in_filters, out_filters))
             else:
-                ffe_layers.append(
-                    nn.Sequential(
-                        nn.Linear(in_filters, out_filters, bias=False),
-                        norm_layer, nn.ReLU(inplace=True)))
+                ffe_layers.append(SequentialPassthrough([
+                    (1, nn.Linear(in_filters, out_filters, bias=False)),
+                    (3, build_norm_layer_ppt(norm_cfg.copy(), out_filters)[1]),
+                    (1, nn.ReLU(inplace=True))]))
         self.ffe_layers = nn.ModuleList(ffe_layers)
         self.compression_layers = None
         if feat_compression is not None:
@@ -75,6 +75,7 @@ class FrustumFeatureEncoder(nn.Module):
                 nn.ReLU(inplace=True))
 
     def forward(self, voxel_dict: dict) -> dict:
+        context_vectors = voxel_dict['context_vectors']
         features = voxel_dict['voxels']
         coors = voxel_dict['coors']
         features_ls = [features]
@@ -97,12 +98,16 @@ class FrustumFeatureEncoder(nn.Module):
         # Combine together feature decorations
         features = torch.cat(features_ls, dim=-1)
         if self.pre_norm is not None:
-            features = self.pre_norm(features)
+            features = self.pre_norm(features, context_vectors, coors)
 
         point_feats = []
         for ffe in self.ffe_layers:
-            features = ffe(features)
+            if (isinstance(ffe, nn.Linear)):
+                features = ffe(features)
+            else:
+                features = ffe(features, context_vectors, coors)
             point_feats.append(features)
+        # soft max equivalent
         voxel_feats = torch_scatter.scatter_max(
             features, inverse_map, dim=0)[0]
 

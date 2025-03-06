@@ -1,5 +1,5 @@
 import argparse
-import os
+import os, json, torch
 import os.path as osp
 
 from mmdet3d.utils import replace_ceph_backend
@@ -140,6 +140,18 @@ def main():
 
     # start testing
     runner.test()
+
+    # Uncomment to save state_dict shape as json
+    # state_dict = runner.model.state_dict()
+    # state_dict_python = {k: v for k, v in state_dict.items()}
+    # # state_dict_json = json.dumps(state_dict_python, indent=4)
+    # with open("model_state.txt", "w") as f:
+    #     f.write(str(state_dict_python))
+    # print("Model state saved as text in 'model_state.txt'.")
+
+    # Uncomment to save weights only
+    print("Saving model_weights.pth")
+    torch.save(runner.model.state_dict(), "model_weights.pth")
 
 
 if __name__ == '__main__':

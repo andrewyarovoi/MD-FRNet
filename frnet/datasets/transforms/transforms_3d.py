@@ -177,7 +177,7 @@ class RangeInterpolation(BaseTransform):
         points_numpy = input_dict['points'].numpy()
         input_dict['num_points'] = points_numpy.shape[0]
 
-        proj_image = np.full((self.H, self.W, 4), -1, dtype=np.float32)
+        proj_image = np.full((self.H, self.W, points_numpy.shape[1]), -1, dtype=np.float32)
         proj_idx = np.full((self.H, self.W), -1, dtype=np.int64)
 
         # get depth of all points
@@ -347,5 +347,248 @@ class InstanceCopy(BaseTransform):
         repr_str = self.__class__.__name__
         repr_str += f'(instance_classes={self.instance_classes}, '
         repr_str += f'pre_transform={self.pre_transform}, '
+        repr_str += f'prob={self.prob})'
+        return repr_str
+    
+@TRANSFORMS.register_module()
+class RoadJiggle(BaseTransform):
+
+    def __init__(self,
+                 instance_classes: List[int],
+                 jiggle_range: List[float],
+                 prob: float = 1.0) -> None:
+        assert is_list_of(instance_classes, int), \
+            'instance_classes should be a list of int'
+        assert is_list_of(jiggle_range, float) and len(jiggle_range) == 2, \
+            'jiggle_range must be list of 2 floats'
+        self.instance_classes = instance_classes
+        self.jiggle_range = jiggle_range
+        self.prob = prob
+
+    def transform(self, input_dict: dict) -> dict:
+        if np.random.rand() > self.prob:
+            return input_dict
+
+        # compute random yaw rotation within range
+        rot_angle = np.random.uniform(self.jiggle_range[0], self.jiggle_range[1], size=1)[0]
+        rot = np.array([
+            [np.cos(rot_angle), -np.sin(rot_angle), 0],
+            [np.sin(rot_angle), np.cos(rot_angle), 0],
+            [0, 0, 1]
+        ]).astype(float)
+
+        # rotate the points belonging to the specified semantic classes
+        points_numpy = input_dict['points'].numpy()
+        for instance_class in self.instance_classes:
+            mix_idx = (input_dict['pts_semantic_mask'] == instance_class)
+            points_numpy[mix_idx, :3] = points_numpy[mix_idx, :3] @ rot.T
+
+        # save the point back in the dataset
+        input_dict['points'] = input_dict['points'].new_point(points_numpy)
+        return input_dict
+
+    def __repr__(self) -> str:
+        """str: Return a string that describes the module."""
+        repr_str = self.__class__.__name__
+        repr_str += f'(instance_classes={self.instance_classes}, '
+        repr_str += f'jiggle_range={self.jiggle_range}, '
+        repr_str += f'prob={self.prob})'
+        return repr_str
+
+@TRANSFORMS.register_module()
+class HistogramEqualization(BaseTransform):
+    def __init__(self,
+                 min_sat_range: List[float],
+                 max_sat_range: List[float],
+                 indices: List[int],
+                 square_comp_indices: List[int] = None,
+                 alpha: float = 0.1,
+                 bins: int = 1000,
+                 min_dist = 1.0,
+                 max_dist = 100.0) -> None:
+        assert is_list_of(min_sat_range, float) and len(min_sat_range) > 0 and len(min_sat_range) <= 2, \
+            'min_sat_range must be 1 or 2 floats'
+        assert is_list_of(max_sat_range, float) and len(max_sat_range) > 0 and len(max_sat_range) <= 2, \
+            'max_sat_range must be 1 or 2 floats'
+        assert is_list_of(indices, int), \
+            'indices must be a list of ints'
+        self.min_sat_range = min_sat_range
+        self.max_sat_range = max_sat_range
+        self.indices = indices
+        self.square_comp_indices = square_comp_indices
+        self.alpha = alpha
+        self.bins = bins
+        self.min_dist = min_dist
+        self.max_dist = max_dist
+
+    def transform(self, input_dict: dict) -> dict:
+        # get min bound
+        if (len(self.min_sat_range) == 1):
+            min_bound = self.min_sat_range[0]
+        elif (len(self.min_sat_range) == 2):
+            min_bound = np.random.uniform(self.min_sat_range[0], self.min_sat_range[1], size=1)[0]
+        
+        # get max bound
+        if (len(self.max_sat_range) == 1):
+            max_bound = self.max_sat_range[0]
+        elif (len(self.max_sat_range) == 2):
+            max_bound = np.random.uniform(self.max_sat_range[0], self.max_sat_range[1], size=1)[0]
+
+        # get points
+        points_numpy = input_dict['points'].numpy()
+
+        # compute distance of each point from origin
+        dists = np.linalg.norm(points_numpy[:, :3], axis=1)
+
+        # histogram equalize each point
+        for index in self.indices:
+            if self.square_comp_indices is None or index not in self.square_comp_indices:
+                normalized = points_numpy[:, index]
+            else:
+                normalized = (self.alpha * self.alpha * dists * dists) * points_numpy[:, index]
+            
+            # compute index of min and max val in sorted array
+            left_index = int(np.round(min_bound * (normalized.shape[0]-1)))
+            right_index = int(np.round(max_bound * (normalized.shape[0]-1)))
+
+            # compute min and max val based on percentage bounds
+            min_val = np.partition(normalized, left_index)[left_index]
+            max_val = np.partition(normalized, right_index)[right_index]
+            val_range = max_val - min_val
+
+            # compute clipped normalized data
+            normalized = (np.clip(normalized, min_val, max_val) - min_val) / val_range
+
+            # compute histogram and cummulative distribution function
+            histogram, bins = np.histogram(normalized, bins=self.bins, range=(0, 1), density=True)
+            cdf = histogram.cumsum()
+            cdf = cdf / cdf[-1]
+
+            # linearly interpolate the data
+            data_equalized = np.interp(normalized, bins[:-1], cdf)
+
+            # store back into points
+            points_numpy[:, index] = data_equalized
+            
+
+        input_dict['points'] = input_dict['points'].new_point(points_numpy)
+
+        return input_dict
+
+    def __repr__(self) -> str:
+        """str: Return a string that describes the module."""
+        repr_str = self.__class__.__name__
+        repr_str += f'(min_sat_range={self.min_sat_range}, '
+        repr_str += f'(max_sat_range={self.max_sat_range}, '
+        repr_str += f'(indices={self.indices}, '
+        repr_str += f'(square_comp_indices={self.square_comp_indices}, '
+        repr_str += f'(alpha={self.alpha}, '
+        repr_str += f'(bins={self.bins}, '
+        repr_str += f'(min_dist={self.min_dist}, '
+        repr_str += f'max_dist={self.max_dist})'
+        return repr_str
+
+@TRANSFORMS.register_module()
+class HistogramLabelEqualization(BaseTransform):
+    def __init__(self,
+                 min_sat: float,
+                 max_sat: float,
+                 square_comp: bool = True,
+                 alpha: float = 0.1,
+                 bins: int = 1000,
+                 min_dist = 1.0,
+                 max_dist = 100.0) -> None:
+        self.min_sat = min_sat
+        self.max_sat = max_sat
+        self.square_comp = square_comp
+        self.alpha = alpha
+        self.bins = bins
+        self.min_dist = min_dist
+        self.max_dist = max_dist
+
+    def transform(self, input_dict: dict) -> dict:
+        # get min max bounds
+        min_bound = self.min_sat
+        max_bound = self.max_sat
+
+        # get points
+        points_numpy = input_dict['points'].numpy()
+
+        # compute distance of each point from origin
+        dists = np.linalg.norm(points_numpy[:, :3], axis=1)
+
+        # histogram equalize the ambient (stored within the semantic mask)
+        print("pts_semantic_mask type: ", type(input_dict['pts_semantic_mask']))
+        print("pts_semantic_mask shape: ", input_dict['pts_semantic_mask'].numpy().shape)
+        pts_semantic_mask = input_dict['pts_semantic_mask'].numpy()
+        
+        if self.square_comp:
+            normalized = (self.alpha * self.alpha) * dists * dists * pts_semantic_mask
+        else:
+            normalized = self.alpha * dists * pts_semantic_mask
+        
+        # compute index of min and max val in sorted array
+        left_index = int(np.round(min_bound * (normalized.shape[0]-1)))
+        right_index = int(np.round(max_bound * (normalized.shape[0]-1)))
+
+        # compute min and max val based on percentage bounds
+        min_val = np.partition(normalized, left_index)[left_index]
+        max_val = np.partition(normalized, right_index)[right_index]
+        val_range = max_val - min_val
+
+        # compute clipped normalized data
+        normalized = (np.clip(normalized, min_val, max_val) - min_val) / val_range
+
+        # compute histogram and cummulative distribution function
+        histogram, bins = np.histogram(normalized, bins=self.bins, range=(0, 1), density=True)
+        cdf = histogram.cumsum()
+        cdf = cdf / cdf[-1]
+
+        # linearly interpolate the data
+        data_equalized = np.interp(normalized, bins[:-1], cdf)
+
+        # store back in the input_dict
+        input_dict['pts_semantic_mask'] = input_dict['pts_semantic_mask'].new_point(data_equalized)
+
+        return input_dict
+
+    def __repr__(self) -> str:
+        """str: Return a string that describes the module."""
+        repr_str = self.__class__.__name__
+        repr_str += f'(min_sat={self.min_sat}, '
+        repr_str += f'(max_sat={self.max_sat}, '
+        repr_str += f'(square_comp={self.square_comp}, '
+        repr_str += f'(alpha={self.alpha}, '
+        repr_str += f'(bins={self.bins}, '
+        repr_str += f'(min_dist={self.min_dist}, '
+        repr_str += f'max_dist={self.max_dist})'
+        return repr_str
+
+@TRANSFORMS.register_module()
+class FeatureDropout(BaseTransform):
+    def __init__(self,
+                 indices: List[int],
+                 prob: float) -> None:
+        assert is_list_of(indices, int), \
+            'indices must be a list of ints'
+        self.indices = indices
+        self.prob = prob
+
+    def transform(self, input_dict: dict) -> dict:
+        # only apply with probability prob
+        if np.random.rand() > self.prob:
+            return input_dict
+        
+        # zero out the indices provided
+        points_numpy = input_dict['points'].numpy()
+        points_numpy[:, self.indices] = np.zeros((points_numpy.shape[0], len(self.indices)))
+        input_dict['points'] = input_dict['points'].new_point(points_numpy)
+
+        return input_dict
+
+    def __repr__(self) -> str:
+        """str: Return a string that describes the module."""
+        repr_str = self.__class__.__name__
+        repr_str += f'(indices={self.indices}, '
         repr_str += f'prob={self.prob})'
         return repr_str

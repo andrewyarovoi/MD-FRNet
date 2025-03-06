@@ -5,7 +5,9 @@ __pycache__/
 data
 
 # custom
-work_dirs/
+# work_dirs/*.pth
 
 # Pytorch
 *.pth
+.qodo
+work_dirs/*

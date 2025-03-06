@@ -1,0 +1,59 @@
+model = dict(
+    type='FRNetPPT',
+    save_output=False,
+    log_path='work_dirs/frnet-mixed_seg',
+    data_preprocessor=dict(
+        type='FrustumRangePreprocessorPPT',
+        in_channels=4,),
+    ignore_index=8,
+    voxel_encoder=dict(
+        type='FrustumFeatureEncoderPPT',
+        in_channels=4,
+        feat_channels=(64, 128, 256, 256),
+        with_distance=True,
+        with_cluster_center=True,
+        norm_cfg=dict(
+            type='point',
+            base_norm=dict(type='SyncBN', eps=1e-3, momentum=0.01),
+            use_ppt=True),
+        with_pre_norm=True,
+        feat_compression=16),
+    backbone=dict(
+        type='FRNetBackbonePPT',
+        in_channels=16,
+        point_in_channels=384,
+        depth=34,
+        stem_channels=128,
+        num_stages=4,
+        out_channels=(128, 128, 128, 128),
+        strides=(1, 2, 2, 2),
+        dilations=(1, 1, 1, 1),
+        fuse_channels=(256, 128),
+        norm_cfg=dict(
+            type='batch',
+            base_norm=dict(type='SyncBN', eps=1e-3, momentum=0.01),
+            use_ppt=True),
+        point_norm_cfg=dict(
+            type='point',
+            base_norm=dict(type='SyncBN', eps=1e-3, momentum=0.01),
+            use_ppt=True),
+        act_cfg=dict(type='HSwish', inplace=True)),
+    decode_head=dict(
+        type='FRHeadPPT',
+        in_channels=128,
+        middle_channels=(128, 256, 128, 64),
+        final_channels=(64, 128, 64),
+        mixup_alpha=0.0,
+        use_ambient=True,
+        norm_cfg=dict(
+            type='point',
+            base_norm=dict(type='SyncBN', eps=1e-3, momentum=0.01),
+            use_ppt=True),
+        channels=64,
+        dropout_ratio=0,
+        loss_ce=dict(
+            type='CrossEntropyLossExtended',
+            use_sigmoid=False,
+            class_weight=None,
+            loss_weight=10.0),
+        conv_seg_kernel_size=1))

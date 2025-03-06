@@ -4,11 +4,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch_scatter
-from mmcv.cnn import (ConvModule, build_activation_layer, build_conv_layer,
-                      build_norm_layer)
+from mmcv.cnn import (build_activation_layer, build_conv_layer)
 from mmdet3d.registry import MODELS
 from mmdet3d.utils import ConfigType, OptConfigType, OptMultiConfig
 from mmengine.model import BaseModule
+from ..normalization.normalization import PPTNorm, PPTPointNorm, SequentialPassthrough, build_norm_layer_ppt
 from torch import Tensor
 
 
@@ -21,13 +21,13 @@ class BasicBlock(BaseModule):
                  dilation: int = 1,
                  downsample: Optional[nn.Module] = None,
                  conv_cfg: OptConfigType = None,
-                 norm_cfg: ConfigType = dict(type='BN'),
+                 norm_cfg: ConfigType = dict(base_norm=dict(type='BN'), use_ppt=False),
                  act_cfg: ConfigType = dict(type='LeakyReLU'),
                  init_cfg: OptMultiConfig = None) -> None:
         super(BasicBlock, self).__init__(init_cfg)
 
-        self.norm1_name, norm1 = build_norm_layer(norm_cfg, planes, postfix=1)
-        self.norm2_name, norm2 = build_norm_layer(norm_cfg, planes, postfix=2)
+        self.norm1_name, norm1 = build_norm_layer_ppt(norm_cfg.copy(), planes, postfix=1)
+        self.norm2_name, norm2 = build_norm_layer_ppt(norm_cfg.copy(), planes, postfix=2)
 
         self.conv1 = build_conv_layer(
             conv_cfg,
@@ -56,18 +56,18 @@ class BasicBlock(BaseModule):
         """
         return getattr(self, self.norm2_name)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, dataset_tokens: Tensor) -> Tensor:
         identity = x
 
         out = self.conv1(x)
-        out = self.norm1(out)
+        out = self.norm1(out, dataset_tokens)
         out = self.relu(out)
 
         out = self.conv2(out)
-        out = self.norm2(out)
+        out = self.norm2(out, dataset_tokens)
 
         if self.downsample is not None:
-            identity = self.downsample(x)
+            identity = self.downsample(x, dataset_tokens)
 
         out += identity
         out = self.relu(out)
@@ -75,7 +75,7 @@ class BasicBlock(BaseModule):
 
 
 @MODELS.register_module()
-class FRNetBackbone(BaseModule):
+class FRNetBackbonePPT(BaseModule):
 
     arch_settings = {
         18: (BasicBlock, (2, 2, 2, 2)),
@@ -98,7 +98,7 @@ class FRNetBackbone(BaseModule):
                  point_norm_cfg: ConfigType = dict(type='BN1d'),
                  act_cfg: ConfigType = dict(type='LeakyReLU'),
                  init_cfg: OptMultiConfig = None) -> None:
-        super(FRNetBackbone, self).__init__(init_cfg)
+        super(FRNetBackbonePPT, self).__init__(init_cfg)
 
         if depth not in self.arch_settings:
             raise KeyError(f'invalid depth {depth} for FRNetBackbone.')
@@ -114,6 +114,8 @@ class FRNetBackbone(BaseModule):
         self.conv_cfg = conv_cfg
         self.norm_cfg = norm_cfg
         self.point_norm_cfg = point_norm_cfg
+        self.use_ppt = norm_cfg["use_ppt"]
+        self.point_use_ppt = point_norm_cfg["use_ppt"]
         self.act_cfg = act_cfg
         self.stem = self._make_stem_layer(in_channels, stem_channels)
         self.point_stem = self._make_point_layer(point_in_channels,
@@ -158,14 +160,16 @@ class FRNetBackbone(BaseModule):
         self.fuse_layers = []
         self.point_fuse_layers = []
         for i, fuse_channel in enumerate(fuse_channels):
-            fuse_layer = ConvModule(
-                in_channels,
-                fuse_channel,
-                kernel_size=3,
-                padding=1,
-                conv_cfg=conv_cfg,
-                norm_cfg=norm_cfg,
-                act_cfg=act_cfg)
+            fuse_layer = SequentialPassthrough([
+                (1, build_conv_layer(
+                        conv_cfg,
+                        in_channels,
+                        fuse_channel,
+                        kernel_size=3,
+                        padding=1,
+                        bias=False)),
+                (2, build_norm_layer_ppt(self.norm_cfg.copy(), fuse_channel)[1]),
+                (1, build_activation_layer(self.act_cfg))])
             point_fuse_layer = self._make_point_layer(in_channels,
                                                       fuse_channel)
             in_channels = fuse_channel
@@ -178,74 +182,74 @@ class FRNetBackbone(BaseModule):
 
     def _make_stem_layer(self, in_channels: int,
                          out_channels: int) -> nn.Module:
-        return nn.Sequential(
-            build_conv_layer(
+        return SequentialPassthrough([
+            (1, build_conv_layer(
                 self.conv_cfg,
                 in_channels,
                 out_channels // 2,
                 kernel_size=3,
                 padding=1,
-                bias=False),
-            build_norm_layer(self.norm_cfg, out_channels // 2)[1],
-            build_activation_layer(self.act_cfg),
-            build_conv_layer(
+                bias=False)),
+            (2, build_norm_layer_ppt(self.norm_cfg.copy(), out_channels // 2)[1]),
+            (1, build_activation_layer(self.act_cfg)),
+            (1, build_conv_layer(
                 self.conv_cfg,
                 out_channels // 2,
                 out_channels,
                 kernel_size=3,
                 padding=1,
-                bias=False),
-            build_norm_layer(self.norm_cfg, out_channels)[1],
-            build_activation_layer(self.act_cfg),
-            build_conv_layer(
+                bias=False)),
+            (2, build_norm_layer_ppt(self.norm_cfg.copy(), out_channels)[1]),
+            (1, build_activation_layer(self.act_cfg)),
+            (1, build_conv_layer(
                 self.conv_cfg,
                 out_channels,
                 out_channels,
                 kernel_size=3,
                 padding=1,
-                bias=False),
-            build_norm_layer(self.norm_cfg, out_channels)[1],
-            build_activation_layer(self.act_cfg))
+                bias=False)),
+            (2, build_norm_layer_ppt(self.norm_cfg.copy(), out_channels)[1]),
+            (1, build_activation_layer(self.act_cfg))])
 
     def _make_point_layer(self, in_channels: int,
                           out_channels: int) -> nn.Module:
-        return nn.Sequential(
-            nn.Linear(in_channels, out_channels, bias=False),
-            build_norm_layer(self.point_norm_cfg, out_channels)[1],
-            nn.ReLU(inplace=True))
+        return SequentialPassthrough([
+            (1, nn.Linear(in_channels, out_channels, bias=False)),
+            (3, build_norm_layer_ppt(self.point_norm_cfg.copy(), out_channels)[1]),
+            (1, nn.ReLU(inplace=True))])
 
     def _make_fusion_layer(self, in_channels: int,
                            out_channels: int) -> nn.Module:
-        return nn.Sequential(
-            build_conv_layer(
+        return SequentialPassthrough([
+            (1, build_conv_layer(
                 self.conv_cfg,
                 in_channels,
                 out_channels,
                 kernel_size=3,
                 padding=1,
-                bias=False),
-            build_norm_layer(self.norm_cfg, out_channels)[1],
-            build_activation_layer(self.act_cfg))
+                bias=False)),
+            (2, build_norm_layer_ppt(self.norm_cfg.copy(), out_channels)[1]),
+            (1, build_activation_layer(self.act_cfg))])
 
     def _make_attention_layer(self, channels: int) -> nn.Module:
-        return nn.Sequential(
-            build_conv_layer(
+        return SequentialPassthrough([
+            (1, build_conv_layer(
                 self.conv_cfg,
                 channels,
                 channels,
                 kernel_size=3,
                 padding=1,
-                bias=False),
-            build_norm_layer(self.norm_cfg, channels)[1],
-            build_activation_layer(self.act_cfg),
-            build_conv_layer(
+                bias=False)),
+            (2, build_norm_layer_ppt(self.norm_cfg.copy(), channels)[1]),
+            (1, build_activation_layer(self.act_cfg)),
+            (1, build_conv_layer(
                 self.conv_cfg,
                 channels,
                 channels,
                 kernel_size=3,
                 padding=1,
-                bias=False),
-            build_norm_layer(self.norm_cfg, channels)[1], nn.Sigmoid())
+                bias=False)),
+            (2, build_norm_layer_ppt(self.norm_cfg.copy(), channels)[1]), (1, nn.Sigmoid())])
 
     def make_res_layer(
         self,
@@ -261,19 +265,19 @@ class FRNetBackbone(BaseModule):
     ) -> nn.Module:
         downsample = None
         if stride != 1 or inplanes != planes:
-            downsample = nn.Sequential(
-                build_conv_layer(
+            downsample = SequentialPassthrough([
+                (1, build_conv_layer(
                     conv_cfg,
                     inplanes,
                     planes,
                     kernel_size=1,
                     stride=stride,
-                    bias=False),
-                build_norm_layer(norm_cfg, planes)[1])
+                    bias=False)),
+                (2, build_norm_layer_ppt(norm_cfg, planes)[1])])
 
         layers = []
         layers.append(
-            block(
+            (2, block(
                 inplanes=inplanes,
                 planes=planes,
                 stride=stride,
@@ -281,22 +285,22 @@ class FRNetBackbone(BaseModule):
                 downsample=downsample,
                 conv_cfg=conv_cfg,
                 norm_cfg=norm_cfg,
-                act_cfg=act_cfg))
+                act_cfg=act_cfg)))
         inplanes = planes
         for _ in range(1, num_blocks):
             layers.append(
-                block(
+                (2, block(
                     inplanes=inplanes,
                     planes=planes,
                     stride=1,
                     dilation=dilation,
                     conv_cfg=conv_cfg,
                     norm_cfg=norm_cfg,
-                    act_cfg=act_cfg))
-        return nn.Sequential(*layers)
+                    act_cfg=act_cfg)))
+        return SequentialPassthrough(layers)
 
     def forward(self, voxel_dict: dict) -> dict:
-
+        context_vectors = voxel_dict['context_vectors']
         point_feats = voxel_dict['point_feats'][-1]
         voxel_feats = voxel_dict['voxel_feats']
         voxel_coors = voxel_dict['voxel_coors']
@@ -304,29 +308,29 @@ class FRNetBackbone(BaseModule):
         batch_size = pts_coors[-1, 0].item() + 1
 
         x = self.frustum2pixel(voxel_feats, voxel_coors, batch_size, stride=1)
-        x = self.stem(x)
+        x = self.stem(x, context_vectors)
         map_point_feats = self.pixel2point(x, pts_coors, stride=1)
         fusion_point_feats = torch.cat((map_point_feats, point_feats), dim=1)
-        point_feats = self.point_stem(fusion_point_feats)
+        point_feats = self.point_stem(fusion_point_feats, context_vectors, pts_coors)
         stride_voxel_coors, frustum_feats = self.point2frustum(
             point_feats, pts_coors, stride=1)
         pixel_feats = self.frustum2pixel(
             frustum_feats, stride_voxel_coors, batch_size, stride=1)
         fusion_pixel_feats = torch.cat((pixel_feats, x), dim=1)
-        x = self.fusion_stem(fusion_pixel_feats)
+        x = self.fusion_stem(fusion_pixel_feats, context_vectors)
 
         outs = [x]
         out_points = [point_feats]
         for i, layer_name in enumerate(self.res_layers):
             res_layer = getattr(self, layer_name)
-            x = res_layer(x)
+            x = res_layer(x, context_vectors)
 
             # frustum-to-point fusion
             map_point_feats = self.pixel2point(
                 x, pts_coors, stride=self.strides[i])
             fusion_point_feats = torch.cat((map_point_feats, point_feats),
                                            dim=1)
-            point_feats = self.point_fusion_layers[i](fusion_point_feats)
+            point_feats = self.point_fusion_layers[i](fusion_point_feats, context_vectors, pts_coors)
 
             # point-to-frustum fusion
             stride_voxel_coors, frustum_feats = self.point2frustum(
@@ -337,9 +341,9 @@ class FRNetBackbone(BaseModule):
                 batch_size,
                 stride=self.strides[i])
             fusion_pixel_feats = torch.cat((pixel_feats, x), dim=1)
-            fuse_out = self.pixel_fusion_layers[i](fusion_pixel_feats)
+            fuse_out = self.pixel_fusion_layers[i](fusion_pixel_feats, context_vectors)
             # residual-attentive
-            attention_map = self.attention_layers[i](fuse_out)
+            attention_map = self.attention_layers[i](fuse_out, context_vectors)
             x = fuse_out * attention_map + x
             outs.append(x)
             out_points.append(point_feats)
@@ -358,9 +362,9 @@ class FRNetBackbone(BaseModule):
         for layer_name, point_layer_name in zip(self.fuse_layers,
                                                 self.point_fuse_layers):
             fuse_layer = getattr(self, layer_name)
-            outs[0] = fuse_layer(outs[0])
+            outs[0] = fuse_layer(outs[0], context_vectors)
             point_fuse_layer = getattr(self, point_layer_name)
-            out_points[0] = point_fuse_layer(out_points[0])
+            out_points[0] = point_fuse_layer(out_points[0], context_vectors, pts_coors)
 
         voxel_dict['voxel_feats'] = outs
         voxel_dict['point_feats_backbone'] = out_points
@@ -387,8 +391,8 @@ class FRNetBackbone(BaseModule):
                     coors: Tensor,
                     stride: int = 1) -> Tensor:
         pixel_features = pixel_features.permute(0, 2, 3, 1).contiguous()
-        point_feats = pixel_features[coors[:, 0], coors[:, 1] // stride,
-                                     coors[:, 2] // stride]
+        point_feats = pixel_features[coors[:, 0], torch.div(coors[:, 1], stride, rounding_mode='trunc'),
+                                     torch.div(coors[:, 2], stride, rounding_mode='trunc')]
         return point_feats
 
     def point2frustum(self,
@@ -396,8 +400,8 @@ class FRNetBackbone(BaseModule):
                       pts_coors: Tensor,
                       stride: int = 1) -> Tuple[Tensor, Tensor]:
         coors = pts_coors.clone()
-        coors[:, 1] = pts_coors[:, 1] // stride
-        coors[:, 2] = pts_coors[:, 2] // stride
+        coors[:, 1] = torch.div(pts_coors[:, 1], stride, rounding_mode='trunc')
+        coors[:, 2] = torch.div(pts_coors[:, 2], stride, rounding_mode='trunc')
         voxel_coors, inverse_map = torch.unique(
             coors, return_inverse=True, dim=0)
         frustum_features = torch_scatter.scatter_max(

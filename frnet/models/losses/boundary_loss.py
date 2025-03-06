@@ -11,16 +11,18 @@ def one_hot(label: Tensor,
             requires_grad: bool = True) -> Tensor:
     """Return One Hot Label."""
     device = label.device
+    # one_hot_label.shape = [B, H, W, C]
     one_hot_label = torch.eye(
         n_classes, device=device, requires_grad=requires_grad)[label]
     one_hot_label = one_hot_label.transpose(1, 3).transpose(2, 3)
 
+    # output.shape = [B, C, H, W]
     return one_hot_label
 
 
 @MODELS.register_module()
 class BoundaryLoss(nn.Module):
-    """Boundary loss."""
+    """Boundary loss: Computes 1 - the boundary pixels F1 score"""
 
     def __init__(self, theta0=3, theta=5, loss_weight: float = 1.0) -> None:
         super(BoundaryLoss, self).__init__()
