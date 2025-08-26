@@ -32,8 +32,10 @@
   bash dist_test.sh ${CONFIG_FILE} ${CHECKPOINT_FILE} ${GPU_NUM}
   ```
 
-**Note**: If you want to test the model with TTA (test time augmentation), you need to add `--tta` argument, such as:
+## Finetune with a single GPU
 
-```bash
-bash dist_test.sh ${CONFIG_FILE} ${CHECKPOINT_FILE} ${GPU_NUM} --tta
-```
+- The default command is as follows:
+
+  ```bash
+  python finetune.py ${CONFIG_FILE} ${CHECKPOINT_FILE}
+  ```

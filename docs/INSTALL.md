@@ -6,12 +6,12 @@ These are modified instructions for creating a compatible conda environment that
 
 Install anaconda and run the following in a terminal:
 ```
-conda create --name frnet -c pytorch python==3.8.18 pytorch==1.10.0 cudatoolkit=11.3 torchvision -y
+conda create --name md_frnet -c pytorch python==3.8.18 pytorch==1.10.0 cudatoolkit=11.3 torchvision -y
 ```
 
 Then activate the new environment:
 ```
-conda activate frnet
+conda activate md_frnet
 ```
 
 ## Install Pip and Mim Dependencies
