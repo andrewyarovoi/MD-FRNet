@@ -3,6 +3,7 @@
 This repo is an adaptation of the [FRNet](https://github.com/Xiangxu-0103/FRNet) repo, integrating [Point Prompt Training](https://arxiv.org/abs/2308.09718) (PPT), [Manifold Mixup](https://arxiv.org/abs/1806.05236) (MM), and ambient values into the FRNet model. This repo also enables multi-dataset pre-training and single-dataset model finetuning. This work primarily served to satisfy a project for CS 8751 at Georgia Institute of Technology. 
 
 Please see our ArXiv publication for more details regarding the implementation:
+[https://arxiv.org/abs/2508.20135](https://arxiv.org/abs/2508.20135)
 
 ## Setup
 To use this code base:
@@ -19,11 +20,14 @@ This work is under the [Apache 2.0 license](LICENSE).
 
 If you find this work helpful, please kindly consider citing our paper:
 ```bibtex
-@article{yarovoi2025MD-FRNet,
-    title = {Data-Efficient Point Cloud Semantic Segmentation Pipeline for Unimproved Roads},
-    author = {Yarovoi, Andrew and Valenta, Christopher and Hays, James},
-    journal = {ArXiv},
-    year = {2025}
+@misc{yarovoi2025mdfrnet,
+      title={Data-Efficient Point Cloud Semantic Segmentation Pipeline for Unimproved Roads}, 
+      author={Andrew Yarovoi and Christopher R. Valenta},
+      year={2025},
+      eprint={2508.20135},
+      archivePrefix={arXiv},
+      primaryClass={eess.IV},
+      url={https://arxiv.org/abs/2508.20135}, 
 }
 ```
 
